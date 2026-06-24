@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>三消游戏 MVP</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0f0f23;
+    color: #e0e0e0;
+    font-family: "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #app {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  #info-bar {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 480px;
+    font-size: 18px;
+    padding: 0 4px;
+  }
+  #info-bar .stat {
+    background: #1a1a2e;
+    padding: 8px 18px;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+  #info-bar .stat b {
+    color: #f0c040;
+    font-size: 22px;
+  }
+  #canvas-wrap {
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.5);
+  }
+  canvas {
+    display: block;
+    max-width: 100vw;
+    max-height: 70vh;
+    cursor: pointer;
+  }
+  #reset-btn {
+    background: #2d2d5e;
+    color: #ccc;
+    border: 1px solid #444;
+    padding: 10px 32px;
+    font-size: 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.15s;
+  }
+  #reset-btn:hover { background: #3d3d7e; color: #fff; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="info-bar">
+    <span class="stat">分数 <b id="score-val">0</b></span>
+    <span class="stat">步数 <b id="moves-val">50</b></span>
+  </div>
+  <div id="canvas-wrap">
+    <canvas id="game-canvas"></canvas>
+  </div>
+  <button id="reset-btn">重新开始</button>
+</div>
+
+<script>
+(function() {
+  'use strict';
+
+  // ── 常量 ──────────────────────────────
+  const ROWS = 8;
+  const COLS = 8;
+  const TILE_SIZE = 54;
+  const GAP = 3;
+  const PADDING = 16;
+  const INITIAL_MOVES = 50;
+  const POINTS_PER_TILE = 10;
+
+  const COLORS = {
+    1: '#E74C3C',
+    2: '#3498DB',
+    3: '#2ECC71',
+    4: '#F1C40F',
+    5: '#9B59B6',
+    6: '#E67E22',
+    0: '#1a1a2e'
+  };
+
+  // ═══════════════════════════════════════
+  // Board 类 — 棋盘数据与操作
+  // ═══════════════════════════════════════
+  class Board {
+    constructor(rows, cols) {
+      this.rows = rows;
+      this.cols = cols;
+      this.grid = [];
+    }
+
+    // 生成无初始三连的随机棋盘
+    generate(matchChecker) {
+      this.grid = [];
+      for (let r = 0; r < this.rows; r++) {
+        this.grid[r] = [];
+        for (let c = 0; c < this.cols; c++) {
+          let value;
+          let attempts = 0;
+          do {
+            value = Math.floor(Math.random() * 6) + 1;
+            attempts++;
+          } while (attempts < 200 && this._wouldMatch(r, c, value));
+          this.grid[r][c] = value;
+        }
+      }
+      // 全盘二次验证：如有遗漏的三连则重来
+      if (matchChecker && matchChecker.findMatches(this.grid).length > 0) {
+        this.generate(matchChecker);
+      }
+    }
+
+    // 在 (row, col) 放置 value 是否会构成三连（仅检查左方与上方已放置的格子）
+    _wouldMatch(row, col, value) {
+      if (col >= 2 &&
+          this.grid[row][col - 1] === value &&
+          this.grid[row][col - 2] === value) return true;
+      if (row >= 2 &&
+          this.grid[row - 1][col] === value &&
+          this.grid[row - 2][col] === value) return true;
+      return false;
+    }
+
+    swap(r1, c1, r2, c2) {
+      const t = this.grid[r1][c1];
+      this.grid[r1][c1] = this.grid[r2][c2];
+      this.grid[r2][c2] = t;
+    }
+
+    isAdjacent(r1, c1, r2, c2) {
+      return Math.abs(r1 - r2) + Math.abs(c1 - c2) === 1;
+    }
+
+    isInBounds(r, c) {
+      return r >= 0 && r < this.rows && c >= 0 && c < this.cols;
+    }
+
+    // 移除一组格子（置为 0）
+    removeCells(cells) {
+      for (const { row, col } of cells) {
+        this.grid[row][col] = 0;
+      }
+    }
+
+    // 重力下落：返回移动记录 [{fromRow, toRow, col}]
+    applyGravity() {
+      const moves = [];
+      for (let c = 0; c < this.cols; c++) {
+        let writeRow = this.rows - 1;
+        for (let r = this.rows - 1; r >= 0; r--) {
+          if (this.grid[r][c] !== 0) {
+            if (r !== writeRow) {
+              this.grid[writeRow][c] = this.grid[r][c];
+              this.grid[r][c] = 0;
+              moves.push({ fromRow: r, toRow: writeRow, col: c });
+            }
+            writeRow--;
+          }
+        }
+      }
+      return moves;
+    }
+
+    // 顶部补充新方块，返回被填充的格子 [{row, col}]
+    fillEmpty() {
+      const filled = [];
+      for (let r = 0; r < this.rows; r++) {
+        for (let c = 0; c < this.cols; c++) {
+          if (this.grid[r][c] === 0) {
+            this.grid[r][c] = Math.floor(Math.random() * 6) + 1;
+            filled.push({ row: r, col: c });
+          }
+        }
+      }
+      return filled;
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // Match 类 — 匹配检测
+  // ═══════════════════════════════════════
+  class Match {
+    // 返回匹配格子的数组 [{row, col}, ...]
+    findMatches(grid) {
+      const rows = grid.length;
+      const cols = grid[0].length;
+      const matched = new Set();
+
+      // 横向检测
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols - 2; c++) {
+          const val = grid[r][c];
+          if (val === 0) continue;
+          let count = 1;
+          while (c + count < cols && grid[r][c + count] === val) count++;
+          if (count >= 3) {
+            for (let i = 0; i < count; i++) matched.add(`${r},${c + i}`);
+          }
+        }
+      }
+
+      // 纵向检测
+      for (let c = 0; c < cols; c++) {
+        for (let r = 0; r < rows - 2; r++) {
+          const val = grid[r][c];
+          if (val === 0) continue;
+          let count = 1;
+          while (r + count < rows && grid[r + count][c] === val) count++;
+          if (count >= 3) {
+            for (let i = 0; i < count; i++) matched.add(`${r + i},${c}`);
+          }
+        }
+      }
+
+      return Array.from(matched).map(key => {
+        const [r, c] = key.split(',').map(Number);
+        return { row: r, col: c };
+      });
+    }
+  }
+
+  // ═══════════════════════════════════════
+  // Game 类 — 游戏主控、渲染、动画
+  // ═══════════════════════════════════════
+  class Game {
+    constructor(canvas, scoreEl, movesEl) {
+      this.canvas = canvas;
+      this.ctx = canvas.getContext('2d');
+      this.scoreEl = scoreEl;
+      this.movesEl = movesEl;
+
+      this.board = new Board(ROWS, COLS);
+      this.matcher = new Match();
+
+      this.score = 0;
+      this.movesLeft = INITIAL_MOVES;
+      this.selectedCell = null;
+      this.state = 'idle';
+
+      // 动画状态
+      this.animType = null;
+      this.animProgress = 0;
+      this.animDuration = 0;
+      this.animData = null;
+      this.animResolve = null;
+
+      this.lastTime = 0;
+
+      this._initCanvas();
+      this.board.generate(this.matcher);
+      this._updateUI();
+
+      this.canvas.addEventListener('click', e => this._handleClick(e));
+      this._gameLoop = this._gameLoop.bind(this);
+      this._animId = requestAnimationFrame(this._gameLoop);
+    }
+
+    _initCanvas() {
+      const w = COLS * (TILE_SIZE + GAP) - GAP + PADDING * 2;
+      const h = ROWS * (TILE_SIZE + GAP) - GAP + PADDING * 2;
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
+
+    _tileX(c) { return PADDING + c * (TILE_SIZE + GAP); }
+    _tileY(r) { return PADDING + r * (TILE_SIZE + GAP); }
+
+    _cellFromPos(clientX, clientY) {
+      const rect = this.canvas.getBoundingClientRect();
+      const sx = this.canvas.width / rect.width;
+      const sy = this.canvas.height / rect.height;
+      const x = (clientX - rect.left) * sx;
+      const y = (clientY - rect.top) * sy;
+      const c = Math.floor((x - PADDING) / (TILE_SIZE + GAP));
+      const r = Math.floor((y - PADDING) / (TILE_SIZE + GAP));
+      if (!this.board.isInBounds(r, c)) return null;
+      const tx = this._tileX(c);
+      const ty = this._tileY(r);
+      if (x >= tx && x < tx + TILE_SIZE && y >= ty && y < ty + TILE_SIZE) {
+        return { row: r, col: c };
+      }
+      return null;
+    }
+
+    _handleClick(e) {
+      if (this.state === 'animating') return;
+      const cell = this._cellFromPos(e.clientX, e.clientY);
+      if (!cell) return;
+
+      if (this.state === 'gameover') {
+        this.restart();
+        return;
+      }
+
+      if (!this.selectedCell) {
+        this.selectedCell = cell;
+      } else if (this.selectedCell.row === cell.row && this.selectedCell.col === cell.col) {
+        this.selectedCell = null;
+      } else if (this.board.isAdjacent(this.selectedCell.row, this.selectedCell.col, cell.row, cell.col)) {
+        const c1 = this.selectedCell;
+        this.selectedCell = null;
+        this._performSwap(c1, cell);
+      } else {
+        this.selectedCell = cell;
+      }
+    }
+
+    async _performSwap(cell1, cell2) {
+      this.state = 'animating';
+
+      this.board.swap(cell1.row, cell1.col, cell2.row, cell2.col);
+      await this._animate('swap', 180, { cell1, cell2 });
+
+      const matches = this.matcher.findMatches(this.board.grid);
+
+      if (matches.length === 0) {
+        this.board.swap(cell1.row, cell1.col, cell2.row, cell2.col);
+        await this._animate('swap_back', 180, { cell1, cell2 });
+      } else {
+        this.movesLeft--;
+        this._updateUI();
+        await this._processChain();
+      }
+
+      if (this.movesLeft <= 0) {
+        this.state = 'gameover';
+      } else {
+        this.state = 'idle';
+      }
+      this._updateUI();
+    }
+
+    async _processChain() {
+      let matches = this.matcher.findMatches(this.board.grid);
+
+      while (matches.length > 0) {
+        this.score += matches.length * POINTS_PER_TILE;
+        this._updateUI();
+
+        const matchSet = new Set(matches.map(m => `${m.row},${m.col}`));
+        await this._animate('remove', 200, { cellSet: matchSet });
+
+        this.board.removeCells(matches);
+        const fallMoves = this.board.applyGravity();
+
+        if (fallMoves.length > 0) {
+          const fallMap = new Map();
+          for (const m of fallMoves) fallMap.set(`${m.toRow},${m.col}`, m.fromRow);
+          await this._animate('fall', 280, { fallMap });
+        }
+
+        const filled = this.board.fillEmpty();
+        if (filled.length > 0) {
+          const fillSet = new Set(filled.map(f => `${f.row},${f.col}`));
+          await this._animate('fill', 200, { cellSet: fillSet });
+        }
+
+        matches = this.matcher.findMatches(this.board.grid);
+      }
+    }
+
+    _animate(type, duration, data) {
+      return new Promise(resolve => {
+        this.animType = type;
+        this.animDuration = duration;
+        this.animProgress = 0;
+        this.animData = data;
+        this.animResolve = resolve;
+      });
+    }
+
+    _gameLoop(timestamp) {
+      if (!this.lastTime) this.lastTime = timestamp;
+      const dt = Math.min(timestamp - this.lastTime, 50);
+      this.lastTime = timestamp;
+
+      if (this.animType) {
+        this.animProgress += dt;
+        if (this.animProgress >= this.animDuration) {
+          this.animProgress = this.animDuration;
+          const resolve = this.animResolve;
+          this.animType = null;
+          this.animData = null;
+          this.animResolve = null;
+          if (resolve) resolve();
+        }
+      }
+
+      this._render();
+      this._animId = requestAnimationFrame(this._gameLoop);
+    }
+
+    _render() {
+      const ctx = this.ctx;
+      const W = this.canvas.width;
+      const H = this.canvas.height;
+      const t = this.animType ? this.animProgress / this.animDuration : 0;
+
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#0f0f23';
+      ctx.fillRect(0, 0, W, H);
+
+      // 棋盘底色
+      const bx = PADDING - 4, by = PADDING - 4;
+      const bw = COLS * (TILE_SIZE + GAP) - GAP + 8;
+      const bh = ROWS * (TILE_SIZE + GAP) - GAP + 8;
+      ctx.fillStyle = '#141428';
+      this._roundRect(bx, by, bw, bh, 6);
+      ctx.fill();
+
+      // 绘制所有格子
+      for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+          const value = this.board.grid[r][c];
+          let dx = this._tileX(c);
+          let dy = this._tileY(r);
+          let alpha = 1;
+          let scale = 1;
+
+          if (this.animType === 'swap' || this.animType === 'swap_back') {
+            const { cell1, cell2 } = this.animData;
+            if (r === cell1.row && c === cell1.col) {
+              dx = this._lerp(this._tileX(cell2.col), this._tileX(cell1.col), t);
+              dy = this._lerp(this._tileY(cell2.row), this._tileY(cell1.row), t);
+            } else if (r === cell2.row && c === cell2.col) {
+              dx = this._lerp(this._tileX(cell1.col), this._tileX(cell2.col), t);
+              dy = this._lerp(this._tileY(cell1.row), this._tileY(cell2.row), t);
+            }
+          } else if (this.animType === 'remove') {
+            if (this.animData.cellSet.has(`${r},${c}`)) {
+              alpha = 1 - t;
+              scale = 1 - t * 0.5;
+            }
+          } else if (this.animType === 'fall') {
+            const fromRow = this.animData.fallMap.get(`${r},${c}`);
+            if (fromRow !== undefined) {
+              const et = this._easeOutQuad(t);
+              dy = this._lerp(this._tileY(fromRow), this._tileY(r), et);
+            }
+          } else if (this.animType === 'fill') {
+            if (this.animData.cellSet.has(`${r},${c}`)) {
+              alpha = t;
+              scale = 0.3 + t * 0.7;
+            }
+          }
+
+          if (alpha > 0.005 && value !== 0) {
+            this._drawTile(value, dx, dy, alpha, scale);
+          }
+        }
+      }
+
+      // 选中高亮
+      if (this.selectedCell && this.state === 'idle') {
+        const { row, col } = this.selectedCell;
+        const sx = this._tileX(col), sy = this._tileY(row);
+        ctx.save();
+        ctx.strokeStyle = '#FFF';
+        ctx.lineWidth = 3;
+        ctx.shadowColor = '#FFF';
+        ctx.shadowBlur = 10;
+        this._roundRect(sx, sy, TILE_SIZE, TILE_SIZE, 5);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 游戏结束遮罩
+      if (this.state === 'gameover') {
+        ctx.fillStyle = 'rgba(10, 10, 30, 0.78)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#FFF';
+        ctx.font = 'bold 30px "Microsoft YaHei", Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('游戏结束', W / 2, H / 2 - 28);
+        ctx.font = '19px "Microsoft YaHei", Arial, sans-serif';
+        ctx.fillText('最终分数: ' + this.score, W / 2, H / 2 + 18);
+        ctx.font = '15px "Microsoft YaHei", Arial, sans-serif';
+        ctx.fillStyle = '#999';
+        ctx.fillText('点击棋盘重新开始', W / 2, H / 2 + 54);
+      }
+    }
+
+    _drawTile(value, x, y, alpha, scale) {
+      const ctx = this.ctx;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+
+      const hs = TILE_SIZE / 2;
+      const cx = x + hs, cy = y + hs;
+      ctx.translate(cx, cy);
+      ctx.scale(scale, scale);
+      ctx.translate(-cx, -cy);
+
+      // 阴影
+      ctx.shadowColor = 'rgba(0,0,0,0.35)';
+      ctx.shadowBlur = 5;
+      ctx.shadowOffsetY = 2;
+
+      // 填充
+      ctx.fillStyle = COLORS[value] || '#334';
+      this._roundRect(x + 1, y + 1, TILE_SIZE - 2, TILE_SIZE - 2, 5);
+      ctx.fill();
+
+      // 顶部高光
+      ctx.shadowColor = 'transparent';
+      ctx.shadowBlur = 0;
+      ctx.shadowOffsetY = 0;
+      ctx.fillStyle = 'rgba(255,255,255,0.13)';
+      this._roundRect(x + 3, y + 3, TILE_SIZE - 6, TILE_SIZE / 2 - 3, [5, 5, 0, 0]);
+      ctx.fill();
+
+      // 数字
+      ctx.fillStyle = '#FFF';
+      ctx.font = 'bold 22px Arial, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = 'rgba(0,0,0,0.45)';
+      ctx.shadowBlur = 2;
+      ctx.fillText(value, cx, cy + 1);
+
+      ctx.restore();
+    }
+
+    _roundRect(x, y, w, h, r) {
+      const ctx = this.ctx;
+      if (typeof r === 'number') r = [r, r, r, r];
+      ctx.beginPath();
+      ctx.moveTo(x + r[0], y);
+      ctx.lineTo(x + w - r[1], y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r[1]);
+      ctx.lineTo(x + w, y + h - r[2]);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r[2], y + h);
+      ctx.lineTo(x + r[3], y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r[3]);
+      ctx.lineTo(x, y + r[0]);
+      ctx.quadraticCurveTo(x, y, x + r[0], y);
+      ctx.closePath();
+    }
+
+    _lerp(a, b, t) { return a + (b - a) * t; }
+    _easeOutQuad(t) { return t * (2 - t); }
+
+    _updateUI() {
+      this.scoreEl.textContent = this.score;
+      this.movesEl.textContent = this.movesLeft;
+    }
+
+    restart() {
+      this.score = 0;
+      this.movesLeft = INITIAL_MOVES;
+      this.selectedCell = null;
+      this.state = 'idle';
+      this.animType = null;
+      this.animData = null;
+      this.board.generate(this.matcher);
+      this._updateUI();
+    }
+
+    destroy() {
+      if (this._animId) cancelAnimationFrame(this._animId);
+    }
+  }
+
+  // ── 启动 ──────────────────────────────
+  const canvas = document.getElementById('game-canvas');
+  const scoreEl = document.getElementById('score-val');
+  const movesEl = document.getElementById('moves-val');
+  const resetBtn = document.getElementById('reset-btn');
+
+  const game = new Game(canvas, scoreEl, movesEl);
+  resetBtn.addEventListener('click', () => game.restart());
+
+})();
+</script>
+</body>
+</html>
